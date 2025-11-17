@@ -1,0 +1,266 @@
+CODE REVIEW AND REFACTORING NOTES
+==================================
+
+This document outlines the issues found in the original code and the fixes applied.
+
+----------------------------------------------------------------
+
+## ISSUE 1. File header / imports
+
+Original Code: no import block did not shown imports for React, WalletRow, classes, or hook declarations.
+
+
+Refactor (new imports & declarations)
+
+      import React, { useMemo } from "react";
+      import { BoxProps } from "../interface/Box";
+      import WalletRow from "./WalletRow";
+      import classes from "./WalletPage.module.css";
+    
+      declare function useWalletBalances(): WalletBalance[];
+      declare function usePrices(): Record<string, number>;
+
+Why:
+Added necessary React import, WalletRow and classes imports (they were referenced but not shown), and typed declare placeholders for useWalletBalances / usePrices so the file is self-contained and TypeScript-safe until real hooks are imported.
+
+----------------------------------------------------------------
+## ISSUE 2: WalletBalance interface: add blockchain
+
+Original (Lines 1-4)
+
+    interface WalletBalance {
+      currency: string;
+      amount: number;
+    }
+
+Refactor Code: 
+
+    interface WalletBalance {
+      currency: string;
+      amount: number;
+      blockchain: string;
+    }
+
+Why:
+blockchain is used elsewhere; adding it fixes typings and prevents runtime/TS errors.
+
+----------------------------------------------------------------
+## ISSUE 3: FormattedWalletBalance extend & add usdValue
+
+Original Code (Lines 5–9):
+
+    interface FormattedWalletBalance {
+      currency: string;
+      amount: number;
+      formatted: string;
+    }
+    
+Refactor Code:
+
+    interface FormattedWalletBalance extends WalletBalance {
+      formatted: string;
+      usdValue: number;
+    }
+
+Why:
+Inheritance reduces duplication and usdValue is required for sorting and rendering.
+
+
+----------------------------------------------------------------
+
+## ISSUE 4: Priority enum & PRIORITY_MAP replace switch
+
+Original Code (Lines 17–36):
+
+      const getPriority = (blockchain: any): number => {
+        switch (blockchain) {
+          case 'Osmosis': return 100
+          case 'Ethereum': return 50
+          case 'Arbitrum': return 30
+          case 'Zilliqa': return 20
+          case 'Neo': return 20
+          default: return -99
+        }
+      }
+Refactor Code:
+
+      enum Priority {
+        Unknown = -99,
+      }
+    
+      const PRIORITY_MAP = {
+        Osmosis: 100,
+        Ethereum: 50,
+        Arbitrum: 30,
+        Zilliqa: 20,
+        Neo: 20,
+      } as const;
+    
+      type Blockchain = keyof typeof PRIORITY_MAP;
+    
+      const getPriority = (blockchain?: string): number =>
+        blockchain && PRIORITY_MAP[blockchain as Blockchain] !== undefined
+          ? PRIORITY_MAP[blockchain as Blockchain]
+          : Priority.Unknown;
+    
+Why:
+Improves readability, centralizes priority data, removes any, and provides a typed fallback via Priority.Unknown.
+
+----------------------------------------------------------------
+
+## ISSUE 5: formatNumber utility (replace toFixed() misuse)
+
+Original Code (Line 59):
+  formatted: balance.amount.toFixed()
+
+Refactor Code: 
+  const formatNumber = (value: number): string =>
+    new Intl.NumberFormat(undefined, {
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 6,
+    }).format(value)
+
+Why: 
+using toFixed() was used incorrectly; Intl.NumberFormat gives locale-aware and consistent formatting.
+
+----------------------------------------------------------------
+
+## ISSUE 6: Consolidated useMemo for filtering, mapping, sorting
+
+Original Code:(Lines 21–52)
+
+    const sortedBalances = useMemo(() => {
+      return balances.filter(...).sort(...);
+    }, [balances, prices]);
+    
+Refactor Code:
+
+    const formattedBalances = useMemo<FormattedWalletBalance[]>(() => {
+      const visible = balances.filter((balance) => {
+        const priority = getPriority(balance.blockchain);
+        if (priority === Priority.Unknown) return false;
+        if (typeof balance.amount !== "number" || balance.amount <= 0) return false;
+        return true;
+      });
+    
+      const mapped: FormattedWalletBalance[] = visible.map((balance) => {
+        const price = Number.isFinite(prices?.[balance.currency]) ? prices[balance.currency] : 0;
+        const usdValue = Number.isFinite(balance.amount * price) ? balance.amount * price : 0;
+        const formatted = formatNumber(balance.amount);
+        return { ...balance, formatted, usdValue };
+      });
+    
+      mapped.sort((lhs, rhs) => {
+        const lp = getPriority(lhs.blockchain);
+        const rp = getPriority(rhs.blockchain);
+        if (lp > rp) return -1;
+        if (lp < rp) return 1;
+    
+        if (lhs.usdValue > rhs.usdValue) return -1;
+        if (lhs.usdValue < rhs.usdValue) return 1;
+    
+        return lhs.currency.localeCompare(rhs.currency);
+      });
+    
+      return mapped;
+    }, [balances, prices]);
+
+Why:
+ -  Fixes multiple bugs:
+
+  - Uses the correct balance variable instead of undefined lhsPriority,
+  
+  - Filters out unknown blockchains and non-positive amounts,
+
+  - Computes usdValue early so it can be used for sorting,
+
+  - Deterministic multi-level sort with final currency fallback,
+
+  - Type annotations for useMemo result.
+
+----------------------------------------------------------------
+
+## ISSUE 7: Using index as React key (Anti-pattern)
+
+Original Code (Line 68):
+
+    const rows = sortedBalances.map((balance: FormattedWalletBalance, index: number) => {
+      ...
+      return (
+        <WalletRow 
+          key={index}
+          ...
+        />
+      )
+    })
+
+Refactor Code:
+
+    const key = `${balance.currency}-${balance.blockchain}`;
+    const rows = sortedAndFilteredBalances.map((balance: WalletBalance) => {
+      ...
+      return (
+        <WalletRow
+          key={key}
+          ...
+        />
+      );
+    });
+
+Why:
+  Use a stable, deterministic key (currency-blockchain) instead of array index.
+
+----------------------------------------------------------------
+
+## ISSUE 8: Final render includes children & rows
+
+Original Code (Lines 69–73, Line 15):
+
+    return (
+      <div {...rest}>
+        {rows}
+      </div>
+    )
+
+Refactor Code:
+
+    return (
+      <div {...rest}>
+        {rows}
+        {children}
+      </div>
+    );
+
+Why:
+Restored children rendering (omitted in earlier destructured). Keeps the rest props spread and renders composed content.
+
+----------------------------------------------------------------
+
+## ISSUE 9: Export default
+
+Original Code (Line 142):
+Not explicitly shown in original snippet
+
+Refactor Code:
+
+     export default WalletPage;
+ 
+Why:
+Standard export preserved for module usage.
+
+----------------------------------------------------------------
+
+## ISSUE 10: Fallback UI
+
+Original Code: 78
+
+Refactor Code: 
+
+      {formattedBalances.length > 0 ? (
+        rows
+      ) : (
+        <div className={classes.empty}>No assets found.</div>
+      )}
+    
+Why:
+Currently, if formattedBalances is empty, no rows render. A fallback like "No assets found" is a UX improvement.
